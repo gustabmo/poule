@@ -22,14 +22,17 @@
 
 // I've seen examples of L298N code using a third pin ENA to enable the motor
 // that's not the case of this MX1508
-#define PinMotorUp 4
-#define PinMotorDown 5
+#define PinMotorDown 4
+#define PinMotorUp 5
+
+#define MotorPowerUp 700
+#define MotorPowerDown 400
 
 #define PinDoorUpSensor 12
 #define PinDoorDownSensor 14
 #define DoorHere LOW
 
-// must be analog input
+// must be an analog input pin
 #define PinLightSensor A0
 
 
@@ -51,14 +54,14 @@ String CopyUpTo ( String s, char c ) {
 unsigned int LastMillis = 0;
 int MillisOverflow = 0;
 
-void LoopClock ( unsigned int now ) {
+void CheckClockOverflow ( unsigned int now ) {
   if (now < LastMillis) {
     MillisOverflow++;
   }
   LastMillis = now;
 }
 
-String DeltaTimeToStr ( unsigned int t ) {
+String TimeTicksToStr ( unsigned int t ) {
   double x;
   char unit;
 
@@ -77,7 +80,11 @@ String DeltaTimeToStr ( unsigned int t ) {
     }
   }
   
-  return "T-" + String(x,1) + unit;
+  return String(x,1) + unit;
+}
+
+String DeltaTimeToStr ( unsigned int t ) {
+  return "T-" + TimeTicksToStr(t);
 }
 
 
@@ -138,10 +145,22 @@ void SetDoorState ( unsigned int now, TdoorState NewState, String caller ) {
   Loga ( now, "door now " + DoorStateName(CurrentDoorState) + " by " + caller );
 }
 
-void MoveDoor ( TdoorState IfThis, TdoorState ThanThat, int Pin, unsigned int now, String caller ) {
+void ReadDoorState ( unsigned int now, String caller ) {
+  TdoorState DS;
+  if (digitalRead(PinDoorUpSensor) == DoorHere) {
+    DS = dsOpen;
+  } else if (digitalRead(PinDoorDownSensor) == DoorHere) {
+    DS = dsClosed;
+  } else {
+    DS = dsUnknown;
+  }
+  SetDoorState ( now, DS, "sensors at "+caller );
+}
+
+void MoveDoor ( TdoorState IfThis, TdoorState ThanThat, int Pin, int MotorPower, unsigned int now, String caller ) {
   if ((CurrentDoorState == IfThis) || (CurrentDoorState == dsUnknown)) {
     SetDoorState ( now, ThanThat, caller );
-    analogWrite ( Pin, 1023 );
+    analogWrite ( Pin, MotorPower );
   }
 }
 
@@ -152,11 +171,11 @@ void StopDoor ( unsigned int now, TdoorState NewState, String caller ) {
 }
 
 void CloseDoor ( unsigned int now, String caller ) {
-  MoveDoor ( /*IfThis*/dsOpen, /*ThanThat*/dsClosing, PinMotorUp, now, caller );
+  MoveDoor ( /*IfThis*/dsOpen, /*ThanThat*/dsClosing, PinMotorDown, MotorPowerDown, now, caller );
 }
 
 void OpenDoor ( unsigned int now, String caller ) {
-  MoveDoor ( /*IfThis*/dsClosed, /*ThanThat*/dsOpening, PinMotorDown, now, caller );
+  MoveDoor ( /*IfThis*/dsClosed, /*ThanThat*/dsOpening, PinMotorUp, MotorPowerUp, now, caller );
 }
 
 void LoopDoorMovement ( unsigned int now ) {
@@ -314,19 +333,23 @@ void WebServerWriteStatusPage ( unsigned int now ) {
   
   client.println ( "<h3>Status</h3>" );
   client.println ( "<table class=\"bluetable\">" );
-  client.println ( "<tr><td>Running since</td><td>" + DeltaTimeToStr(now) + "</td></tr>" );
-  client.println ( "<tr><td>Clock Overflow (+-49d)</td><td>" + String(MillisOverflow) + "</td></tr>" );
-  client.println ( "<tr><td>Door</td><td>" + DoorStateName(CurrentDoorState) + "</td></tr>" );
-  client.println ( "<tr><td>Since</td><td>" + DeltaTimeToStr(now-CurrentDoorStateSince) + "</td></tr>" );
-  client.println ( "<tr><td>Pause</td><td>" );
-  if (PauseDoorMovementByLightSince == 0) {
-    client.println ( "no" );
-  } else {
-    client.println ( DeltaTimeToStr(now-PauseDoorMovementByLightSince) );
+  { // table
+    client.println ( "<tr><td>Running time</td><td>" + TimeTicksToStr(now) + "</td></tr>" );
+    client.println ( "<tr><td>Clock Overflow (+-49d)</td><td>" + String(MillisOverflow) + "</td></tr>" );
+    client.println ( "<tr><td>Door</td><td>" + DoorStateName(CurrentDoorState) + "</td></tr>" );
+    client.println ( "<tr><td>Since</td><td>" + DeltaTimeToStr(now-CurrentDoorStateSince) + "</td></tr>" );
+    client.println ( "<tr><td>Pause</td><td>" );
+    { // td
+      if (PauseDoorMovementByLightSince == 0) {
+        client.println ( "no" );
+      } else {
+        client.println ( TimeTicksToStr ( PauseDoorMovementByLightLength - (now-PauseDoorMovementByLightSince) ) );
+      }
+    }
+    client.println ( "</td></tr>" );
+    client.println ( "<tr><td>Door Up</td><td>" + DoorPinStateName( PinDoorUpSensor ) + "</td></tr>" );
+    client.println ( "<tr><td>Door Down</td><td>" + DoorPinStateName( PinDoorDownSensor ) + "</td></tr>" );
   }
-  client.println ( "</td></tr>" );
-  client.println ( "<tr><td>Door Up</td><td>" + DoorPinStateName( PinDoorUpSensor ) + "</td></tr>" );
-  client.println ( "<tr><td>Door Down</td><td>" + DoorPinStateName( PinDoorDownSensor ) + "</td></tr>" );
   client.println ( "</table>" );
 
   switch (CurrentDoorState) {
@@ -339,22 +362,31 @@ void WebServerWriteStatusPage ( unsigned int now ) {
     case dsError : 
       client.println ( Button("Reset Door","/door/reset") );
       break;
+    case dsUnknown : 
+      client.println ( Button("Open Door","/door/open") );
+      client.println ( Button("Close Door","/door/close") );
+      break;
   }
 
   client.println ( "<h3>Light</h3>" );
 
   client.println ( "<table><tr><td class=\"bigtd\">" );
 
+  { // td
     client.println ( "<table class=\"bluetable\">" );
-    client.println ( "<tr><td>Open</td><td>&lt;" + String(LMDoorOpen) + "</td></tr>" );
-    client.println ( "<tr><td>Close</td><td>&gt;" + String(LMDoorClose) + "</td></tr>" );
-    client.println ( "<tr><td>Min</td><td>" + String(LastLMMin) + "</td></tr>" );
-    client.println ( "<tr><td>Max</td><td>" + String(LastLMMax) + "</td></tr>" );
-    client.println ( "<tr><td>Average</td><td>" + String(LastLMAvg) + "</td></tr>" );
+    { // table
+      client.println ( "<tr><td>Open</td><td>&lt;" + String(LMDoorOpen) + "</td></tr>" );
+      client.println ( "<tr><td>Close</td><td>&gt;" + String(LMDoorClose) + "</td></tr>" );
+      client.println ( "<tr><td>Min</td><td>" + String(LastLMMin) + "</td></tr>" );
+      client.println ( "<tr><td>Max</td><td>" + String(LastLMMax) + "</td></tr>" );
+      client.println ( "<tr><td>Average</td><td>" + String(LastLMAvg) + "</td></tr>" );
+    }
     client.println ( "</table>" );
+  }
 
-    client.println ( "</td><td class=\"bigtd\">" );
+  client.println ( "</td><td class=\"bigtd\">" );
 
+  { // td
     client.println ( "<table class=\"bluetable\">" );
     for ( i = 0; i < LastLMLength; ++i ) {
       client.println ( 
@@ -363,6 +395,7 @@ void WebServerWriteStatusPage ( unsigned int now ) {
       );
     }
     client.println ( "</table>" );
+  }
 
   client.println ( "</td></tr></table>" );
 
@@ -402,7 +435,7 @@ void WebServerProcessRequest ( unsigned int now ) {
     operation = "Close Door !";
     PauseDoorMovementByLightSince = now;
   } else if (ReqHeader.indexOf("GET /door/reset") >= 0) {
-    SetDoorState ( now, dsUnknown, "Web " + CopyUpTo ( ReqHeader, '\n' ) );
+    ReadDoorState ( now, "Web " + CopyUpTo ( ReqHeader, '\n' ) );
     operation = "Reset Door !";
   } else {
     BackButton = 0;
@@ -421,7 +454,7 @@ void WebServerProcessRequest ( unsigned int now ) {
   client.println ( ".bluetable { padding: 10px 15px; border-radius:10px; background-color:lightblue; }" );
   client.println ( "td { padding: 2px 8px; background-color:aliceblue; }" );
   client.println ( ".bigtd { padding: 0px 6px; background-color:white; vertical-align:baseline}" );
-  client.println ( ".bluebutton { padding: 20px 45px; border-radius:12px; background-color:lightpurple; font-weight:bold; cursor:pointer;}" );
+  client.println ( ".bluebutton { padding: 20px 45px; border-radius:12px; background-color:lightskyblue; font-weight:bold; cursor:pointer;}" );
   client.println ( "</style></head>" );
 
   client.println ( "<body><h1>Poule</h1>" );
@@ -537,20 +570,12 @@ void setup() {
   pinMode ( PinLightSensor, INPUT );
 
   unsigned int now = millis();
-  Loga ( now, "program starting v1" );
+  Loga ( now, "program starting" );
 
   analogWrite ( PinMotorUp, 0 );
   analogWrite ( PinMotorDown, 0 );
 
-  TdoorState DS;
-  if (digitalRead(PinDoorUpSensor) == DoorHere) {
-    DS = dsOpen;
-  } else if (digitalRead(PinDoorDownSensor) == DoorHere) {
-    DS = dsClosed;
-  } else {
-    DS = dsUnknown;
-  }
-  SetDoorState ( now, DS, "sensors at setup" );
+  ReadDoorState ( now, "setup" );
 }
 
 
@@ -559,7 +584,7 @@ void setup() {
 void loop() {
   unsigned int now = millis(); // use a single "now" moment for all routines
 
-  LoopClock ( now );
+  CheckClockOverflow ( now );
   LoopLightMeasure ( now );
   LoopDoorMovement ( now );
   LoopWebServer ( now );
