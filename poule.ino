@@ -25,8 +25,8 @@
 #define PinMotorDown 4
 #define PinMotorUp 5
 
-#define MotorPowerUp 700
-#define MotorPowerDown 400
+#define MotorPowerUp 720
+#define MotorPowerDown 260
 
 #define PinDoorUpSensor 12
 #define PinDoorDownSensor 14
@@ -48,45 +48,55 @@ String CopyUpTo ( String s, char c ) {
   }
 }
 
+void SetMaxDelay ( int* Delay, int MaxDelay ) {
+  if (*Delay > MaxDelay) {
+    *Delay = MaxDelay;
+  }
+}
+
+
 
 // ------ system clock
 
 unsigned int LastMillis = 0;
 int MillisOverflow = 0;
 
-void CheckClockOverflow ( unsigned int now ) {
+void CheckClockOverflow ( unsigned int now, int *Delay ) {
   if (now < LastMillis) {
     MillisOverflow++;
   }
   LastMillis = now;
+  SetMaxDelay ( Delay, 24*60*60*1000 ); // once a day is good enough
 }
 
 String TimeTicksToStr ( unsigned int t ) {
-  double x;
-  char unit;
+  double d,h,m,s;
 
-  x = (double)t / 1000;
-  unit='s';
-  if (x >= 60) {
-    x=x/60;
-    unit='m';
-    if (x >= 60) {
-      x=x/60;
-      unit='h';
-      if (x >= 24) {
-        x=x/24;
-        unit='d';
+  s = (double)t / 1000;
+  if (s <= 60.5) {
+    return String(s,1)+"s";
+  } else {
+    m = floor ( s/60 );
+    s = s - m*60;
+    if (m <= 60) {
+      return String(m,0)+"m " + String(s,0)+"s";
+    } else {
+      h = floor ( m/60 );
+      m = m - h*60;
+      if (h <= 24) {
+        return String(h,0)+"h " + String(m,0)+"m " + String(s,0)+"s";  
+      } else {
+        d = floor ( h/24 );
+        h = h - d*24;
+        return String(d,0)+"d " + String(h,1)+"h " + String(m,0)+"m";
       }
     }
   }
-  
-  return String(x,1) + unit;
 }
 
 String DeltaTimeToStr ( unsigned int t ) {
   return "T-" + TimeTicksToStr(t);
 }
-
 
 
 // ------ event log
@@ -117,7 +127,10 @@ void Loga ( unsigned int now, String event ) {
 TdoorState CurrentDoorState = dsUnknown;
 unsigned long CurrentDoorStateSince = 0;
 
-#define TimeoutDoorMovement 20000
+#define TimeoutDoorMovement 22000
+
+// the delay between loops when the door is moving and thus we need to check the pin frequently
+#define DelayCheckingDoorMovement 200 
 
 String DoorPinStateName ( int pin ) {
   if (digitalRead(pin) == DoorHere) {
@@ -157,10 +170,11 @@ void ReadDoorState ( unsigned int now, String caller ) {
   SetDoorState ( now, DS, "sensors at "+caller );
 }
 
-void MoveDoor ( TdoorState IfThis, TdoorState ThanThat, int Pin, int MotorPower, unsigned int now, String caller ) {
+void MoveDoor ( TdoorState IfThis, TdoorState ThanThat, int Pin, int MotorPower, unsigned int now, int *Delay, String caller ) {
   if ((CurrentDoorState == IfThis) || (CurrentDoorState == dsUnknown)) {
     SetDoorState ( now, ThanThat, caller );
     analogWrite ( Pin, MotorPower );
+    SetMaxDelay ( Delay, DelayCheckingDoorMovement );
   }
 }
 
@@ -170,15 +184,15 @@ void StopDoor ( unsigned int now, TdoorState NewState, String caller ) {
   SetDoorState ( now, NewState, caller );
 }
 
-void CloseDoor ( unsigned int now, String caller ) {
-  MoveDoor ( /*IfThis*/dsOpen, /*ThanThat*/dsClosing, PinMotorDown, MotorPowerDown, now, caller );
+void CloseDoor ( unsigned int now, int *Delay, String caller ) {
+  MoveDoor ( /*IfThis*/dsOpen, /*ThanThat*/dsClosing, PinMotorDown, MotorPowerDown, now, Delay, caller );
 }
 
-void OpenDoor ( unsigned int now, String caller ) {
-  MoveDoor ( /*IfThis*/dsClosed, /*ThanThat*/dsOpening, PinMotorUp, MotorPowerUp, now, caller );
+void OpenDoor ( unsigned int now, int *Delay, String caller ) {
+  MoveDoor ( /*IfThis*/dsClosed, /*ThanThat*/dsOpening, PinMotorUp, MotorPowerUp, now, Delay, caller );
 }
 
-void LoopDoorMovement ( unsigned int now ) {
+void LoopDoorMovement ( unsigned int now, int *Delay ) {
   int CheckPin;
   TdoorState NewDS;
 
@@ -202,6 +216,8 @@ void LoopDoorMovement ( unsigned int now ) {
       StopDoor ( now, NewDS, "check pin "+String(CheckPin) );
     } else if (now-CurrentDoorStateSince > TimeoutDoorMovement) {
       StopDoor ( now, dsError, "timeout" );
+    } else {
+      SetMaxDelay ( Delay, DelayCheckingDoorMovement );
     }
   }
 } // LoopDoorMovement()
@@ -228,13 +244,15 @@ TLightMeasure LMChanges[LMChangesLength];
 unsigned int PauseDoorMovementByLightSince = 0;
 #define PauseDoorMovementByLightLength 120000
 
-#define LMInterval 15000
+#define LMInterval 30000
 
-#define LMDoorOpen 600
-#define LMDoorClose 700
+#define LMDoorOpen 900
+#define LMDoorClose 980
 
 
-void LoopLightMeasure ( unsigned int now ) {
+void LoopLightMeasure ( unsigned int now, int *Delay ) {
+  SetMaxDelay ( Delay, LMInterval );
+
   if (now-LastLM[0].millis > LMInterval) {
     memmove ( &LastLM[1], &LastLM[0], (LastLMLength - 1)*sizeof(LastLM[0]) );
     LastLM[0].millis = now;
@@ -264,9 +282,9 @@ void LoopLightMeasure ( unsigned int now ) {
       } else {
         PauseDoorMovementByLightSince = 0;
         if (LastLMMin > LMDoorClose) {
-          CloseDoor ( now, "min light " + String(LastLMMin) );
+          CloseDoor ( now, Delay, "min light " + String(LastLMMin) );
         } else if (LastLMMax < LMDoorOpen) {
-          OpenDoor ( now, "max light " + String(LastLMMax) );
+          OpenDoor ( now, Delay, "max light " + String(LastLMMax) );
         }
       }
 
@@ -338,12 +356,17 @@ void WebServerWriteStatusPage ( unsigned int now ) {
     client.println ( "<tr><td>Clock Overflow (+-49d)</td><td>" + String(MillisOverflow) + "</td></tr>" );
     client.println ( "<tr><td>Door</td><td>" + DoorStateName(CurrentDoorState) + "</td></tr>" );
     client.println ( "<tr><td>Since</td><td>" + DeltaTimeToStr(now-CurrentDoorStateSince) + "</td></tr>" );
-    client.println ( "<tr><td>Pause</td><td>" );
+    client.println ( "<tr><td>Door Pause Countdown</td><td>" );
     { // td
       if (PauseDoorMovementByLightSince == 0) {
         client.println ( "no" );
+      } else if (PauseDoorMovementByLightLength < (now-PauseDoorMovementByLightSince)) {
+        // this may happen if the pause time exhausted but the pause end check hasn't run yet
+        client.println ( "over" );
       } else {
-        client.println ( TimeTicksToStr ( PauseDoorMovementByLightLength - (now-PauseDoorMovementByLightSince) ) );
+        client.println ( 
+          TimeTicksToStr ( PauseDoorMovementByLightLength - (now-PauseDoorMovementByLightSince) ) 
+        );
       }
     }
     client.println ( "</td></tr>" );
@@ -422,16 +445,16 @@ void WebServerWriteStatusPage ( unsigned int now ) {
 } // WebServerWriteStatusPage
 
 
-void WebServerProcessRequest ( unsigned int now ) {
+void WebServerProcessRequest ( unsigned int now, int *Delay ) {
   bool BackButton = 1;
   String operation = "";
 
   if (ReqHeader.indexOf("GET /door/open") >= 0) {
-    OpenDoor ( now, "Web " + CopyUpTo ( ReqHeader, '\n' ) );
+    OpenDoor ( now, Delay, "Web " + CopyUpTo ( ReqHeader, '\n' ) );
     operation = "Open Door !";
     PauseDoorMovementByLightSince = now;
   } else if (ReqHeader.indexOf("GET /door/close") >= 0) {
-    CloseDoor ( now, "Web " + CopyUpTo ( ReqHeader, '\n' ) );
+    CloseDoor ( now, Delay, "Web " + CopyUpTo ( ReqHeader, '\n' ) );
     operation = "Close Door !";
     PauseDoorMovementByLightSince = now;
   } else if (ReqHeader.indexOf("GET /door/reset") >= 0) {
@@ -454,7 +477,7 @@ void WebServerProcessRequest ( unsigned int now ) {
   client.println ( ".bluetable { padding: 10px 15px; border-radius:10px; background-color:lightblue; }" );
   client.println ( "td { padding: 2px 8px; background-color:aliceblue; }" );
   client.println ( ".bigtd { padding: 0px 6px; background-color:white; vertical-align:baseline}" );
-  client.println ( ".bluebutton { padding: 20px 45px; border-radius:12px; background-color:lightskyblue; font-weight:bold; cursor:pointer;}" );
+  client.println ( ".bluebutton { padding: 20px 45px; border-radius:12px; background-color:lightskyblue; font-size: 150%; font-weight:bold; cursor:pointer;}" );
   client.println ( "</style></head>" );
 
   client.println ( "<body><h1>Poule</h1>" );
@@ -477,7 +500,7 @@ void WebServerProcessRequest ( unsigned int now ) {
 } // WebServerProcessRequest()
 
 
-void LoopWebServerConnected ( unsigned int now ) {
+void LoopWebServerConnected ( unsigned int now, int *Delay ) {
   int ReqHeaderComplete = 0;
   char c;
 
@@ -505,7 +528,7 @@ void LoopWebServerConnected ( unsigned int now ) {
     int DestroyClient = 1;
 
     if (ReqHeaderComplete) {
-      WebServerProcessRequest ( now );
+      WebServerProcessRequest ( now, Delay );
     } else if (!client.connected()) {
       // do nothing, but client will be stopped
     } else if (now-LastWiFiActivity > TimeoutWebServerRequest ) {
@@ -518,12 +541,14 @@ void LoopWebServerConnected ( unsigned int now ) {
       client.stop();
       ClientInUse = 0;
       ReqHeader = "";
+    } else {
+      SetMaxDelay ( Delay, 500 );
     }
   }
 } // LoopWebServerConnected()
 
 
-void LoopWebServer ( unsigned int now ) {
+void LoopWebServer ( unsigned int now, int *Delay ) {
   int WiFiStatus = WiFi.status();
 
   if (LastWiFiStatus != WiFiStatus) {
@@ -539,7 +564,7 @@ void LoopWebServer ( unsigned int now ) {
 
   if (WiFiStatus == WL_CONNECTED) {
 
-    LoopWebServerConnected ( now );
+    LoopWebServerConnected ( now, Delay );
 
   } else {
 
@@ -547,9 +572,11 @@ void LoopWebServer ( unsigned int now ) {
       Loga ( now, "WiFi.begin" );
       WiFi.disconnect();
       WiFi.begin ( ssid, password );
-      LastWiFiActivity = now;
+      LastWiFiActivity = now;      
     }
   }
+
+  SetMaxDelay ( Delay, 3000 ); // we want a minimally responsive web server so at max this waiting time for it to realize there's a connection waiting
 } // LoopWebServer()
 
 
@@ -583,11 +610,12 @@ void setup() {
 
 void loop() {
   unsigned int now = millis(); // use a single "now" moment for all routines
+  int Delay = 0x7fffffff; // delay between loops... the longest possible to save battery, but each procedure below can and should lower this value as needed
 
-  CheckClockOverflow ( now );
-  LoopLightMeasure ( now );
-  LoopDoorMovement ( now );
-  LoopWebServer ( now );
+  CheckClockOverflow ( now, &Delay );
+  LoopLightMeasure ( now, &Delay );
+  LoopDoorMovement ( now, &Delay );
+  LoopWebServer ( now, &Delay );
 
-  delay ( 200 );
+  delay ( Delay );
 }
