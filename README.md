@@ -2,9 +2,9 @@
 // poule.ino by guexel@gmail.com
 //
 // Arduino ESP8266 software to control a chicken coop door
-// opens at dawn and closes at dusk
+// open at dawn when the ambient light passes a threshold, and cloes on dusk also controlled by the light
 // connects via wifi
-// web server with information and manual control of the door
+// offers a web server with information and manual control of the door
 //
 // compile in Arduino IDE https://www.arduino.cc/en/Main/Software
 // with http://arduino.esp8266.com/stable/package_esp8266com_index.json
